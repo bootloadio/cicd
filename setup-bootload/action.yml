@@ -103,15 +103,20 @@ runs:
             echo "::error::org/project need a token to resolve; pass token, or drop them and use --project on each step"
             exit 1
           fi
-          if ! bootload org use --help >/dev/null 2>&1; then
-            echo "::error::this deployment serves a CLI without 'org use' / 'project use' (added in v0.1.21) — drop the org/project inputs and pass --project on each step instead"
+          # No pre-flight check for the command's existence: `bootload org
+          # use --help` exits 0 even on a CLI that has no `use` subcommand
+          # (cobra prints the parent's help), so the guard passed and the
+          # customer then got a confusing "could not select organization".
+          # Run the real thing and name both causes when it fails.
+          select_failed() {
+            echo "::error::could not select $1 '$2'. Either the name is wrong, or this deployment still serves a CLI older than v0.1.21, which has no '$1 use'. Drop the org/project inputs and pass --project on each step instead."
             exit 1
-          fi
+          }
           # Org first: a project name is resolved inside the selected org.
           if [ -n "${IN_ORG:-}" ]; then
-            bootload org use "$IN_ORG" || { echo "::error::could not select organization '$IN_ORG'"; exit 1; }
+            bootload org use "$IN_ORG" || select_failed org "$IN_ORG"
           fi
           if [ -n "${IN_PROJECT:-}" ]; then
-            bootload project use "$IN_PROJECT" || { echo "::error::could not select project '$IN_PROJECT'"; exit 1; }
+            bootload project use "$IN_PROJECT" || select_failed project "$IN_PROJECT"
           fi
         fi
