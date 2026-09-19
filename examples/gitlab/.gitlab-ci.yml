@@ -1,0 +1,30 @@
+# GitLab CI equivalent of the deploy-hook workflow. Store BOOTLOAD_DEPLOY_HOOK
+# and BOOTLOAD_DEPLOY_SECRET as masked CI/CD variables.
+deploy:
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+    ORG: acme
+    PROJECT: production
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  resource_group: deploy-web
+  script:
+    - apk add --no-cache curl openssl
+    - curl -fsSL https://bootload.io/v1/cli/install.sh | sh
+    - export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+    - TAG=$CI_COMMIT_SHORT_SHA
+    - docker build --platform linux/amd64 -t web:$TAG .
+    - bootload image login --org "$ORG" --project "$PROJECT"
+    - bootload image push web:$TAG --org "$ORG" --project "$PROJECT"
+    # Sign the call rather than putting the secret in the URL.
+    - |
+      BODY="{\"tag\":\"$TAG\"}"
+      TS=$(date -u +%s)
+      SIG=$(printf '%s' "$TS.$BODY" | openssl dgst -sha256 -hmac "$BOOTLOAD_DEPLOY_SECRET" -hex | awk '{print $NF}')
+      curl -fsS -X POST "$BOOTLOAD_DEPLOY_HOOK?wait=1" \
+        -H 'content-type: application/json' \
+        -H "X-Bootload-Signature: t=$TS,v1=$SIG" \
+        -d "$BODY"

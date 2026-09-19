@@ -1,0 +1,23 @@
+# Check that a pull request's image builds and would deploy, without
+# deploying it. `bootload update --dry-run` reports what would change,
+# including the monthly cost delta and whether it means downtime.
+name: pr-check
+
+on:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: bootloadio/cicd/setup-bootload@v1
+        with:
+          token: ${{ secrets.BOOTLOAD_TOKEN }}
+          project: production
+
+      - run: docker build --platform linux/amd64 -t "web:pr-${{ github.event.number }}" .
+
+      - name: what would change
+        run: bootload update web --project production --dry-run

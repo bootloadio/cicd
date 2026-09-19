@@ -1,0 +1,49 @@
+# Build, push, roll, and wait until the service is healthy, rolling back if
+# it is not. This needs an API key, because waiting means reading deployment
+# status and a deploy hook cannot read anything.
+#
+#   bootload token create ci \
+#     --scope projects:read --scope services:read --scope services:write \
+#     --scope deployments:read --scope deployments:write \
+#     --scope registry:push --scope registry:pull \
+#     --project production
+#
+# projects:read is what makes `--project production` resolve by name.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-web
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: bootloadio/cicd/setup-bootload@v1
+        with:
+          token: ${{ secrets.BOOTLOAD_TOKEN }}
+          project: production
+
+      - name: build and push
+        id: build
+        run: |
+          TAG="${GITHUB_SHA::7}"
+          docker build --platform linux/amd64 -t "web:$TAG" .
+          bootload image login --project production
+          bootload image push "web:$TAG" --project production
+          echo "ref=registry.bootload.io/acme/production/web:$TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: bootloadio/cicd/deploy@v1
+        with:
+          service: web
+          project: production
+          image: ${{ steps.build.outputs.ref }}
+          wait: "true"
+          timeout: "300"
+          rollback-on-failure: "true"

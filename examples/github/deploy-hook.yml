@@ -1,0 +1,44 @@
+# Build, push to the bootload registry, and roll the service with a deploy
+# hook. No API key anywhere in this workflow.
+#
+# Create the hook once:
+#   bootload deploy-hook create web --name "github actions"
+# Store the printed URL and secret as repository secrets
+# BOOTLOAD_DEPLOY_HOOK and BOOTLOAD_DEPLOY_SECRET.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-web
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The image still has to reach the registry, and pushing needs a
+      # registry-scoped key. Mint it with:
+      #   bootload token create ci --scope projects:read \
+      #     --scope registry:push --scope registry:pull --project production
+      - uses: bootloadio/cicd/setup-bootload@v1
+        with:
+          token: ${{ secrets.BOOTLOAD_REGISTRY_TOKEN }}
+          project: production
+
+      - name: build and push
+        run: |
+          TAG="${GITHUB_SHA::7}"
+          docker build --platform linux/amd64 -t "web:$TAG" .
+          bootload image login --project production
+          bootload image push "web:$TAG" --project production
+
+      - uses: bootloadio/cicd/deploy@v1
+        with:
+          hook-url: ${{ secrets.BOOTLOAD_DEPLOY_HOOK }}
+          hook-secret: ${{ secrets.BOOTLOAD_DEPLOY_SECRET }}
+          tag: ${{ github.sha }}   # the hook only changes the tag of the image the service already runs

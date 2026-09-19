@@ -1,0 +1,206 @@
+name: Deploy to bootload
+description: >-
+  Roll a bootload service onto an image and wait until the deployment is
+  healthy, rolling back if it is not. Works with an API key or with a deploy
+  hook, which cannot deploy anything but this one service.
+author: faastic bv
+branding:
+  icon: upload-cloud
+  color: blue
+
+inputs:
+  service:
+    description: Service name or id to roll. Required unless you use hook-url.
+    required: false
+    default: ""
+  image:
+    description: >-
+      Image reference to deploy. With hook-url, it must stay inside the
+      service's current repository. Leave empty to re-pull the configured
+      image, which is what you want for a mutable tag.
+    required: false
+    default: ""
+  tag:
+    description: >-
+      Tag to deploy, as an alternative to a full image reference. The
+      repository is the one the service already runs.
+    required: false
+    default: ""
+  hook-url:
+    description: >-
+      A deploy-hook URL from `bootload deploy-hook create`. Using this needs no
+      API key: the hook can only roll its own service, inside that service's
+      repository.
+    required: false
+    default: ""
+  hook-secret:
+    description: >-
+      The deploy hook's secret. Store it as a repository secret. The action
+      signs each call with it; the secret never travels in the URL.
+    required: false
+    default: ""
+  token:
+    description: >-
+      A bootload API key, if you are not using a deploy hook. Also read from
+      the BOOTLOAD_TOKEN environment variable, which setup-bootload sets.
+    required: false
+    default: ""
+  project:
+    description: Project name or id (API-key mode; ignored with a deploy hook).
+    required: false
+    default: ""
+  api:
+    description: API base URL. Leave empty for production.
+    required: false
+    default: ""
+  wait:
+    description: >-
+      Wait for the deployment to become healthy before succeeding. API-key
+      mode only: a deploy hook holds no read scope and cannot poll.
+    required: false
+    default: "true"
+  timeout:
+    description: Seconds to wait for health before giving up.
+    required: false
+    default: "300"
+  rollback-on-failure:
+    description: >-
+      Roll back to the previous deployment if the new one does not get healthy.
+      API-key mode only; a deploy hook is not allowed to roll back.
+    required: false
+    default: "true"
+
+outputs:
+  deployment-id:
+    description: The id of the deployment that was created.
+    value: ${{ steps.deploy.outputs.deployment-id }}
+  image:
+    description: The image reference that was deployed.
+    value: ${{ steps.deploy.outputs.image }}
+
+runs:
+  using: composite
+  steps:
+    - id: deploy
+      shell: bash
+      env:
+        IN_SERVICE: ${{ inputs.service }}
+        IN_IMAGE: ${{ inputs.image }}
+        IN_TAG: ${{ inputs.tag }}
+        IN_HOOK_URL: ${{ inputs.hook-url }}
+        IN_HOOK_SECRET: ${{ inputs.hook-secret }}
+        IN_TOKEN: ${{ inputs.token }}
+        IN_PROJECT: ${{ inputs.project }}
+        IN_API: ${{ inputs.api }}
+        IN_WAIT: ${{ inputs.wait }}
+        IN_TIMEOUT: ${{ inputs.timeout }}
+        IN_ROLLBACK: ${{ inputs.rollback-on-failure }}
+      run: |
+        set -euo pipefail
+
+        # Masking is GitHub's job for a `secrets.` input, but do it here too:
+        # a value passed as plain text would otherwise be readable in the log.
+        [ -n "${IN_HOOK_SECRET:-}" ] && echo "::add-mask::$IN_HOOK_SECRET"
+        [ -n "${IN_TOKEN:-}" ] && echo "::add-mask::$IN_TOKEN"
+
+        # jq ships on every GitHub-hosted runner; fall back to sed elsewhere.
+        json_field() {
+          if command -v jq >/dev/null 2>&1; then
+            jq -r ".$1 // empty"
+          else
+            sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1
+          fi
+        }
+
+        # ---- deploy-hook mode: no API key, no CLI needed --------------------
+        if [ -n "${IN_HOOK_URL:-}" ]; then
+          if [ -z "${IN_HOOK_SECRET:-}" ]; then
+            echo "::error::hook-url was given without hook-secret"; exit 1
+          fi
+          if [ -n "${IN_TAG:-}" ] && [ -n "${IN_IMAGE:-}" ]; then
+            echo "::error::pass either tag or image, not both"; exit 1
+          fi
+          body='{}'
+          if [ -n "${IN_TAG:-}" ]; then
+            body=$(printf '{"tag":"%s"}' "$IN_TAG")
+          elif [ -n "${IN_IMAGE:-}" ]; then
+            body=$(printf '{"image":"%s"}' "$IN_IMAGE")
+          fi
+
+          # Sign rather than putting the secret in the query string: a URL
+          # ends up in proxy logs and in curl's own error output, a header
+          # does not. Same scheme as bootload's wake webhooks.
+          ts=$(date -u +%s)
+          sig=$(printf '%s' "$ts.$body" \
+                | openssl dgst -sha256 -hmac "$IN_HOOK_SECRET" -hex \
+                | awk '{print $NF}')
+
+          # ?wait=1 returns the deployment, so a non-2xx here is a real
+          # failure. Keep the body on failure: it carries the reason, such as
+          # an empty wallet or an image outside the service's repository.
+          out=$(mktemp)
+          code=$(curl -sS -o "$out" -w '%{http_code}' -X POST "${IN_HOOK_URL}?wait=1" \
+                   -H 'content-type: application/json' \
+                   -H "X-Bootload-Signature: t=$ts,v1=$sig" \
+                   -d "$body" || echo 000)
+          if [ "$code" != "200" ] && [ "$code" != "202" ]; then
+            echo "::error::deploy hook returned $code: $(cat "$out")"
+            exit 1
+          fi
+          dep=$(json_field id < "$out")
+          img=$(json_field image < "$out")
+          echo "deployment-id=$dep" >> "$GITHUB_OUTPUT"
+          echo "image=$img" >> "$GITHUB_OUTPUT"
+          echo "::notice::rolled onto ${img:-the configured image} (deployment ${dep:-unknown})"
+          if [ "${IN_WAIT:-true}" = "true" ]; then
+            echo "::warning::wait is ignored in deploy-hook mode, because a hook cannot read deployment status. Use an API key to wait for health."
+          fi
+          exit 0
+        fi
+
+        # ---- API-key mode ----------------------------------------------------
+        if [ -z "${IN_SERVICE:-}" ]; then
+          echo "::error::service is required (or pass hook-url)"; exit 1
+        fi
+        [ -n "${IN_TOKEN:-}" ] && export BOOTLOAD_TOKEN="$IN_TOKEN"
+        [ -n "${IN_API:-}" ] && export BOOTLOAD_API="$IN_API"
+        if [ -z "${BOOTLOAD_TOKEN:-}" ]; then
+          echo "::error::no API key — pass token, run setup-bootload with a token, or use hook-url"; exit 1
+        fi
+        if ! command -v bootload >/dev/null 2>&1; then
+          echo "::error::the bootload CLI is not on PATH — add bootloadio/cicd/setup-bootload before this step"; exit 1
+        fi
+
+        proj=()
+        [ -n "${IN_PROJECT:-}" ] && proj=(--project "$IN_PROJECT")
+
+        image="${IN_IMAGE:-}"
+        if [ -z "$image" ] && [ -n "${IN_TAG:-}" ]; then
+          # Reuse the repository the service already runs, so a bare tag means
+          # the same thing here as it does through a deploy hook.
+          current=$(bootload status "$IN_SERVICE" "${proj[@]}" --json | json_field image)
+          if [ -z "$current" ]; then
+            echo "::error::could not read the current image of $IN_SERVICE to apply tag '$IN_TAG' — pass image instead"; exit 1
+          fi
+          repo="${current%@*}"; repo="${repo%:*}"
+          image="${repo}:${IN_TAG}"
+        fi
+
+        args=(update "$IN_SERVICE" "${proj[@]}")
+        [ -n "$image" ] && args+=(--image "$image")
+        if [ "${IN_WAIT:-true}" = "true" ]; then
+          args+=(--wait --wait-until healthy --timeout "${IN_TIMEOUT:-300}")
+        fi
+
+        if bootload "${args[@]}"; then
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "::notice::$IN_SERVICE is running ${image:-its configured image}"
+        else
+          code=$?
+          echo "::error::deploy failed (exit $code)"
+          if [ "${IN_ROLLBACK:-true}" = "true" ]; then
+            echo "::warning::rolling back $IN_SERVICE"
+            bootload rollback "$IN_SERVICE" "${proj[@]}" || true
+          fi
+          exit $code
+        fi

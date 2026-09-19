@@ -1,0 +1,96 @@
+name: Set up bootload CLI
+description: >-
+  Install the bootload CLI on the runner and, optionally, authenticate it so
+  later steps can deploy, push images or read logs.
+author: faastic bv
+branding:
+  icon: anchor
+  color: blue
+
+inputs:
+  expect-version:
+    description: >-
+      Fail the job if the installed CLI is not this version, e.g. v0.1.22.
+      The platform serves one current release, so this is an assertion rather
+      than a download pin: your pipeline breaks loudly when the CLI changes
+      under it, instead of changing behaviour silently. Leave empty to accept
+      whatever is current.
+    required: false
+    default: ""
+  api:
+    description: API base URL. Leave empty for production (https://my.bootload.io).
+    required: false
+    default: ""
+  token:
+    description: >-
+      A bootload API key, from `bootload token create`. Store it as a repository
+      secret and pass it here; it is exported as BOOTLOAD_TOKEN for later steps.
+      Leave empty if the job only uses a deploy hook, which needs no API key.
+    required: false
+    default: ""
+  project:
+    description: Project name or id to select as the default for later steps.
+    required: false
+    default: ""
+  org:
+    description: Organization slug or id to select as the default for later steps.
+    required: false
+    default: ""
+
+outputs:
+  version:
+    description: The CLI version that was installed.
+    value: ${{ steps.install.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - id: install
+      shell: bash
+      env:
+        BOOTLOAD_API: ${{ inputs.api }}
+        EXPECT_VERSION: ${{ inputs.expect-version }}
+      run: |
+        set -euo pipefail
+        base="${BOOTLOAD_API:-https://my.bootload.io}"
+        # The installer is served by the platform, so the runner gets exactly
+        # the build that deployment publishes, checksum-verified.
+        curl -fsSL "$base/v1/cli/install.sh" | sh
+        # It installs to /usr/local/bin when writable, else ~/.local/bin.
+        # Put both on PATH for every later step rather than guessing.
+        echo "/usr/local/bin" >> "$GITHUB_PATH"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"
+        command -v bootload >/dev/null 2>&1 || { echo "::error::the CLI installed but is not on PATH"; exit 1; }
+        got="$(bootload --version | tr -d '\r')"
+        echo "version=$got" >> "$GITHUB_OUTPUT"
+        echo "$got"
+        if [ -n "${EXPECT_VERSION:-}" ] && [ "${got#*$EXPECT_VERSION}" = "$got" ]; then
+          echo "::error::expected CLI $EXPECT_VERSION but the platform serves $got"
+          exit 1
+        fi
+
+    - shell: bash
+      env:
+        BOOTLOAD_TOKEN: ${{ inputs.token }}
+        BOOTLOAD_API: ${{ inputs.api }}
+        IN_PROJECT: ${{ inputs.project }}
+        IN_ORG: ${{ inputs.org }}
+      run: |
+        set -euo pipefail
+        # Export for later steps. Masking is GitHub's job for a secret input,
+        # but do it explicitly too: a token pasted as a plain input would
+        # otherwise be readable in the log.
+        if [ -n "${BOOTLOAD_TOKEN:-}" ]; then
+          echo "::add-mask::$BOOTLOAD_TOKEN"
+          echo "BOOTLOAD_TOKEN=$BOOTLOAD_TOKEN" >> "$GITHUB_ENV"
+        fi
+        if [ -n "${BOOTLOAD_API:-}" ]; then
+          echo "BOOTLOAD_API=$BOOTLOAD_API" >> "$GITHUB_ENV"
+        fi
+        if [ -n "${IN_ORG:-}" ]; then
+          echo "BOOTLOAD_ORG=$IN_ORG" >> "$GITHUB_ENV"
+        fi
+        if [ -n "${IN_PROJECT:-}" ]; then
+          echo "BOOTLOAD_PROJECT=$IN_PROJECT" >> "$GITHUB_ENV"
+        fi
