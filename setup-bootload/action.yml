@@ -29,11 +29,15 @@ inputs:
     required: false
     default: ""
   project:
-    description: Project name or id to select as the default for later steps.
+    description: >-
+      Project name or id to select as the default for later steps, via
+      `bootload project use`. Needs a token, and a CLI of v0.1.21 or newer.
     required: false
     default: ""
   org:
-    description: Organization slug or id to select as the default for later steps.
+    description: >-
+      Organization slug or id to select as the default for later steps, via
+      `bootload org use`. Needs a token, and a CLI of v0.1.21 or newer.
     required: false
     default: ""
 
@@ -78,6 +82,7 @@ runs:
         IN_ORG: ${{ inputs.org }}
       run: |
         set -euo pipefail
+        export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"
         # Export for later steps. Masking is GitHub's job for a secret input,
         # but do it explicitly too: a token pasted as a plain input would
         # otherwise be readable in the log.
@@ -88,9 +93,25 @@ runs:
         if [ -n "${BOOTLOAD_API:-}" ]; then
           echo "BOOTLOAD_API=$BOOTLOAD_API" >> "$GITHUB_ENV"
         fi
-        if [ -n "${IN_ORG:-}" ]; then
-          echo "BOOTLOAD_ORG=$IN_ORG" >> "$GITHUB_ENV"
-        fi
-        if [ -n "${IN_PROJECT:-}" ]; then
-          echo "BOOTLOAD_PROJECT=$IN_PROJECT" >> "$GITHUB_ENV"
+        # Selecting a default org/project means writing the CLI's config,
+        # which is what `org use` / `project use` do. There are no
+        # BOOTLOAD_ORG / BOOTLOAD_PROJECT environment variables: exporting
+        # those looked right and silently did nothing (caught by running this
+        # action against a real fleet, 2026-09-19).
+        if [ -n "${IN_ORG:-}${IN_PROJECT:-}" ]; then
+          if [ -z "${BOOTLOAD_TOKEN:-}" ]; then
+            echo "::error::org/project need a token to resolve; pass token, or drop them and use --project on each step"
+            exit 1
+          fi
+          if ! bootload org use --help >/dev/null 2>&1; then
+            echo "::error::this deployment serves a CLI without 'org use' / 'project use' (added in v0.1.21) — drop the org/project inputs and pass --project on each step instead"
+            exit 1
+          fi
+          # Org first: a project name is resolved inside the selected org.
+          if [ -n "${IN_ORG:-}" ]; then
+            bootload org use "$IN_ORG" || { echo "::error::could not select organization '$IN_ORG'"; exit 1; }
+          fi
+          if [ -n "${IN_PROJECT:-}" ]; then
+            bootload project use "$IN_PROJECT" || { echo "::error::could not select project '$IN_PROJECT'"; exit 1; }
+          fi
         fi
