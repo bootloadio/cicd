@@ -31,14 +31,20 @@ jobs:
           project: production
 
       - name: build and push
+        id: build
         run: |
+          # One tag, used by both steps. Pushing web:$TAG and then asking the
+          # hook for a different tag is the easy mistake here.
           TAG="${GITHUB_SHA::7}"
           docker build --platform linux/amd64 -t "web:$TAG" .
           bootload image login --project production
           bootload image push "web:$TAG" --project production
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
+      # The hook can only change the tag of the image this service already
+      # runs, so it needs the tag and nothing else.
       - uses: bootloadio/cicd/deploy@v1
         with:
           hook-url: ${{ secrets.BOOTLOAD_DEPLOY_HOOK }}
           hook-secret: ${{ secrets.BOOTLOAD_DEPLOY_SECRET }}
-          tag: ${{ github.sha }}   # the hook only changes the tag of the image the service already runs
+          tag: ${{ steps.build.outputs.tag }}

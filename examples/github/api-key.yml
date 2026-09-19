@@ -37,6 +37,8 @@ jobs:
           docker build --platform linux/amd64 -t "web:$TAG" .
           bootload image login --project production
           bootload image push "web:$TAG" --project production
+          # Replace acme with your organization slug; `bootload image push`
+          # prints the full reference it used.
           echo "ref=registry.bootload.io/acme/production/web:$TAG" >> "$GITHUB_OUTPUT"
 
       - uses: bootloadio/cicd/deploy@v1
