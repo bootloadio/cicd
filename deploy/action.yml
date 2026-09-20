@@ -60,7 +60,9 @@ inputs:
     required: false
     default: "true"
   timeout:
-    description: Seconds to wait for health before giving up.
+    description: >-
+      How long to wait for health before giving up. A plain number is seconds;
+      a Go duration such as 90s or 3m also works.
     required: false
     default: "300"
   rollback-on-failure:
@@ -189,7 +191,13 @@ runs:
         args=(update "$IN_SERVICE" "${proj[@]}")
         [ -n "$image" ] && args+=(--image "$image")
         if [ "${IN_WAIT:-true}" = "true" ]; then
-          args+=(--wait --wait-until healthy --timeout "${IN_TIMEOUT:-300}")
+          # The CLI's --timeout is a Go duration, so a bare number is
+          # rejected outright: "missing unit in duration". This input is
+          # documented in seconds, so add the unit when it is a plain number
+          # and pass anything else (90s, 3m) straight through.
+          to="${IN_TIMEOUT:-300}"
+          case "$to" in ''|*[!0-9]*) ;; *) to="${to}s" ;; esac
+          args+=(--wait --wait-until healthy --timeout "$to")
         fi
 
         if bootload "${args[@]}"; then
