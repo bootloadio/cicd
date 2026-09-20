@@ -108,15 +108,27 @@ runs:
           # (cobra prints the parent's help), so the guard passed and the
           # customer then got a confusing "could not select organization".
           # Run the real thing and name both causes when it fails.
-          select_failed() {
-            echo "::error::could not select $1 '$2'. Either the name is wrong, or this deployment still serves a CLI older than v0.1.21, which has no '$1 use'. Drop the org/project inputs and pass --project on each step instead."
+          # Show what the CLI said rather than guessing at the cause. An
+          # earlier version replaced its message with a list of maybes, and
+          # when a real account turned out to belong to several organizations
+          # the log blamed the project name and the CLI version, while the
+          # CLI itself had printed "multiple organizations — pass --org".
+          select_one() { # <org|project> <value>
+            local out
+            if out=$(bootload "$1" use "$2" 2>&1); then
+              return 0
+            fi
+            echo "::error::could not select $1 '$2': $out"
+            case "$out" in
+              *"multiple organizations"*)
+                echo "::error::this account is in more than one organization, so a project name is ambiguous — set the 'org' input as well" ;;
+              *"unknown subcommand"*|*"unknown command"*)
+                echo "::error::this deployment serves a CLI older than v0.1.21, which has no '$1 use' — drop the org/project inputs and pass --project on each step" ;;
+            esac
             exit 1
           }
           # Org first: a project name is resolved inside the selected org.
-          if [ -n "${IN_ORG:-}" ]; then
-            bootload org use "$IN_ORG" || select_failed org "$IN_ORG"
-          fi
-          if [ -n "${IN_PROJECT:-}" ]; then
-            bootload project use "$IN_PROJECT" || select_failed project "$IN_PROJECT"
-          fi
+          [ -n "${IN_ORG:-}" ] && select_one org "$IN_ORG"
+          [ -n "${IN_PROJECT:-}" ] && select_one project "$IN_PROJECT"
+          true
         fi
